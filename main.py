@@ -190,23 +190,25 @@ def download_video(url, out_dir="downloads", cookies=None):
 
 def login(username, password):
     res = requests.post(
-        f"{BASE_URL}/api/auth/login",
+        f"{BASE_URL}/api/auth/login_api",
         json={
             "username": username,
-            "password": password,
-            "turnstileToken": "optional-string",
+            "password": password
         },
         timeout=30,
     )
 
-    res.raise_for_status()
+    if not res.ok:
+        print("登录失败，状态码：", res.status_code)
+        print("后端返回：", res.text)
+        raise RuntimeError("登录失败")
+
     data = res.json()
 
     if not data.get("success"):
         raise RuntimeError(f"登录失败：{data}")
 
     return data["token"]
-
 
 def check_hash(token, file_hash):
     res = requests.post(
