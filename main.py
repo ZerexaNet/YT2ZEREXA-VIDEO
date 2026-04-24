@@ -4,6 +4,7 @@ import hashlib
 import requests
 from tqdm import tqdm
 from yt_dlp import YoutubeDL
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 BASE_URL = "https://video.zerexa.cn"
 CONFIG_FILE = "config.json"
@@ -170,6 +171,9 @@ def download_video(url, out_dir="downloads", cookies=None):
         "format": "bv*+ba/best",
         "merge_output_format": "mp4",
         "noplaylist": True,
+
+        # 多线程/多连接下载
+        "concurrent_fragment_downloads": 8,
     }
 
     if cookies:
@@ -284,30 +288,42 @@ def upload_chunk(token, upload_id, key, part_number, data):
     return res.json()["part"]
 
 
-def multipart_upload(token, upload_id, key, path):
-    parts = []
+def multipart_upload(token, upload_id, key, path, threads=4):
     size = os.path.getsize(path)
+    parts = []
 
-    with open(path, "rb") as f, tqdm(
+    def read_part(part_number):
+        offset = (part_number - 1) * CHUNK_SIZE
+        with open(path, "rb") as f:
+            f.seek(offset)
+            data = f.read(CHUNK_SIZE)
+        return part_number, data
+
+    total_parts = (size + CHUNK_SIZE - 1) // CHUNK_SIZE
+
+    def worker(part_number):
+        part_number, data = read_part(part_number)
+        part = upload_chunk(token, upload_id, key, part_number, data)
+        return part, len(data)
+
+    with tqdm(
         total=size,
         unit="B",
         unit_scale=True,
-        desc="分片上传",
+        desc=f"分片上传 {threads}线程",
     ) as bar:
-        part_number = 1
+        with ThreadPoolExecutor(max_workers=threads) as executor:
+            futures = [
+                executor.submit(worker, part_number)
+                for part_number in range(1, total_parts + 1)
+            ]
 
-        while True:
-            chunk = f.read(CHUNK_SIZE)
+            for future in as_completed(futures):
+                part, uploaded_size = future.result()
+                parts.append(part)
+                bar.update(uploaded_size)
 
-            if not chunk:
-                break
-
-            part = upload_chunk(token, upload_id, key, part_number, chunk)
-            parts.append(part)
-
-            bar.update(len(chunk))
-            part_number += 1
-
+    parts.sort(key=lambda x: x["PartNumber"])
     return parts
 
 
@@ -356,7 +372,8 @@ def move_one(url, manual_category, config, token):
 
     path, title, description, source_url = download_video(
         url,
-        cookies=config.get("cookies")
+        cookies=config.get("cookies"),
+        download_threads=config.get("download_threads", 8)
     )
 
     category = manual_category or detect_category(title, description)
@@ -404,7 +421,13 @@ def move_one(url, manual_category, config, token):
     else:
         print("使用分片上传模式...")
         upload_id = init["uploadId"]
-        parts = multipart_upload(token, upload_id, key, path)
+        parts = multipart_upload(
+            token,
+            upload_id,
+            key,
+            path,
+            threads=config.get("upload_threads", 4)
+        )
 
         print("正在完成上传...")
         result = complete_upload(

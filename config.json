@@ -1,6 +1,7 @@
 {
   "username": "demo",
   "password": "123456",
-  "cookies": "cookies.txt",
-  "keep": false
+  "keep": false,
+  "upload_threads": 8,
+  "download_threads": 4
 }
