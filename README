@@ -1,0 +1,214 @@
+# Zerexa Video 自动上传脚本
+
+用于将在线视频下载后自动上传到 Zerexa Video，支持批量处理与自动分类。
+
+请仅上传你拥有版权或已获得授权的视频内容。
+
+---
+
+## 功能特性
+
+- 支持输入多个视频链接批量处理
+- 自动下载视频（基于 yt-dlp）
+- 自动提取标题、简介、原始链接
+- 自动计算 SHA256（用于秒传判断）
+- 秒传检测（服务器已有则跳过上传）
+- 自动上传（支持直传 / 分片上传）
+- 自动分类（基于标题和简介关键词）
+- 支持手动指定分类（优先级高于自动分类）
+- 自动写入来源链接（直传模式）
+- 上传进度显示
+- 可选保留本地文件（keep 配置）
+
+---
+
+## 安装依赖
+
+```bash
+pip install requests yt-dlp tqdm
+```
+
+---
+
+## 文件结构
+
+main.py
+config.json
+cookies.txt
+
+---
+
+## 配置文件（config.json）
+{
+  "username": "demo",
+  "password": "123456",
+  "cookies": "cookies.txt",
+  "keep": false
+}
+字段说明
+| 字段       | 说明             |
+| -------- | -------------- |
+| username | 账号用户名          |
+| password | 账号密码           |
+| cookies  | 可选，用于需要登录状态的视频 |
+| keep     | 是否保留下载的视频文件    |
+
+
+---
+
+## 使用方法
+```bash
+python main.py
+```
+
+启动后输入视频链接，一行一个，输入空行后开始执行。
+
+---
+
+## 自动分类
+
+脚本会根据标题和简介自动识别分类。
+
+示例：
+
+| 内容       | 分类                  |
+| -------- | ------------------- |
+| AI / GPT | Tech / AI           |
+| 编程 / 代码  | Tech / Programming  |
+| 游戏实况     | Games / Gameplay    |
+| 美食制作     | Food / Recipe       |
+| 篮球 / NBA | Sports / Basketball |
+
+
+无法匹配时默认分类为：
+
+General / Other
+手动指定分类
+
+格式：
+
+视频链接 | 分类名
+
+示例：
+
+https://example.com/video | Tech / AI
+
+手动指定会覆盖自动分类结果。
+
+keep 参数说明
+"keep": false
+
+上传完成后自动删除本地视频文件。
+
+"keep": true
+
+上传完成后保留本地视频文件。
+
+cookies 说明
+
+部分视频需要登录状态才能下载，可以提供 cookies 文件：
+
+"cookies": "cookies.txt"
+
+不需要时可以删除该字段。
+
+---
+
+## 分类列表
+```
+General / Vlog
+General / Daily
+General / Other
+Tech / Programming
+Tech / AI
+Tech / Hardware
+Tech / Mobile
+Tech / Cybersecurity
+Music / Original
+Music / Cover
+Music / Instrumental
+Music / MV
+Music / Live
+Games / Gameplay
+Games / Esports
+Games / Review
+Games / Mobile Games
+Games / Indie
+Life / Cooking
+Life / Fitness
+Life / Home
+Life / Relationships
+Life / Pets
+Entertainment / Variety
+Entertainment / Reaction
+Entertainment / Challenge
+Entertainment / Prank
+Entertainment / Unboxing
+Sports / Football
+Sports / Basketball
+Sports / Outdoor
+Sports / Martial Arts
+Sports / Extreme
+Food / Recipe
+Food / Restaurant
+Food / Street Food
+Food / Baking
+Food / Drinks
+Travel / City
+Travel / Nature
+Travel / Road Trip
+Travel / International
+Travel / Tips
+Fashion / Outfit
+Fashion / Makeup
+Fashion / Skincare
+Fashion / Haul
+Fashion / Styling
+Education / Science
+Education / History
+Education / Language
+Education / Math
+Education / DIY
+News / World
+News / Tech News
+News / Finance
+News / Politics
+News / Environment
+Anime / Review
+Anime / AMV
+Anime / Discussion
+Anime / Cosplay
+Anime / Manga
+Film / Review
+Film / Short Film
+Film / Behind the Scenes
+Film / Documentary
+Film / Trailer
+Comedy / Sketch
+Comedy / Stand-up
+Comedy / Memes
+Comedy / Parody
+Comedy / Satire
+Comedy / Abstract
+Fitness / Workout
+Fitness / Yoga
+Fitness / Nutrition
+Fitness / Weight Loss
+Fitness / Running
+Science / Physics
+Science / Biology
+Science / Space
+Science / Chemistry
+Science / Engineering
+Cars / Review
+Cars / Modification
+Cars / Racing
+Cars / EV
+Cars / Maintenance
+```
+
+---
+
+## 注意事项
+请勿上传侵权内容
+请勿泄露账号信息
