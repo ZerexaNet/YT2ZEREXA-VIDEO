@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 BASE_URL = "https://video.zerexa.cn"
 CONFIG_FILE = "config.json"
-CHUNK_SIZE = 64 * 1024 * 1024
+CHUNK_SIZE = 8 * 1024 * 1024
 
 SESSION = requests.Session()
 SESSION.trust_env = False
@@ -394,6 +394,113 @@ def finalize_direct_upload(token, key, video_id, title, description, category, s
 
 
 def move_one(url, manual_category, config, token):
+    print(f"\n开始处理：{url}")
+
+    path, title, description, source_url, thumbnail = download_video(
+        url,
+        cookies=config.get("cookies"),
+        download_threads=config.get("download_threads", 8),
+    )
+
+    category = manual_category or detect_category(title, description)
+
+    print(f"标题：{title}")
+    print(f"分类：{category}")
+    print(f"来源：{source_url}")
+    print(f"封面：{thumbnail}")
+
+    print("正在计算 SHA256...")
+    file_hash = sha256_file(path)
+
+    print("正在检查秒传...")
+    hash_result = check_hash(token, file_hash)
+
+    if hash_result.get("exists"):
+        print("服务器已存在，跳过上传：")
+        print(json.dumps(hash_result, ensure_ascii=False, indent=2))
+
+        if not config.get("keep", False):
+            os.remove(path)
+
+        return
+
+    print("正在初始化上传...")
+    init = init_upload(token, path)
+
+    key = init["key"]
+    video_id = init["videoId"]
+
+    size = os.path.getsize(path)
+
+    if init.get("directUpload") or size < 100 * 1024 * 1024:
+        if size < 100 * 1024 * 1024:
+            print("小文件，强制直传...")
+        else:
+            print("使用直传模式...")
+
+        proxy_put_upload(token, key, path)
+
+        print("正在写入数据库...")
+        result = finalize_direct_upload(
+            token=token,
+            key=key,
+            video_id=video_id,
+            title=title,
+            description=description,
+            category=category,
+            source_url=source_url,
+            file_hash=file_hash,
+            thumbnail=thumbnail,
+        )
+    else:
+        print("使用分片上传模式...")
+        upload_id = init["uploadId"]
+
+        parts = multipart_upload(
+            token,
+            upload_id,
+            key,
+            path,
+            threads=config.get("upload_threads", 4),
+        )
+
+        print("正在完成上传...")
+        result = complete_upload(
+            token=token,
+            upload_id=upload_id,
+            key=key,
+            video_id=video_id,
+            parts=parts,
+            title=title,
+            description=description,
+            category=category,
+            thumbnail=thumbnail,
+        )
+
+    print("上传完成：")
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+    if not config.get("keep", False):
+        os.remove(path)
+        print("已删除本地文件。")
+    size = os.path.getsize(path)
+
+    if size < 100 * 1024 * 1024:
+        print("小文件，强制直传...")
+        proxy_put_upload(token, key, path)
+
+        result = finalize_direct_upload(
+            token=token,
+            key=key,
+            video_id=video_id,
+            title=title,
+            description=description,
+            category=category,
+            source_url=source_url,
+            file_hash=file_hash,
+            thumbnail=thumbnail,
+        )
+        return
     print(f"\n开始处理：{url}")
 
     path, title, description, source_url, thumbnail = download_video(
