@@ -1,6 +1,7 @@
 import os
 import json
 import hashlib
+import time
 import requests
 from tqdm import tqdm
 from yt_dlp import YoutubeDL
@@ -8,7 +9,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 BASE_URL = "https://video.zerexa.cn"
 CONFIG_FILE = "config.json"
-CHUNK_SIZE = 8 * 1024 * 1024
+CHUNK_SIZE = 64 * 1024 * 1024
+
+SESSION = requests.Session()
+SESSION.trust_env = False
 
 
 CATEGORY_LIST = [
@@ -145,9 +149,11 @@ def parse_input(line):
     if "|" in line:
         url, category = line.split("|", 1)
         category = category.strip()
+
         if category not in CATEGORY_LIST:
             print(f"分类不存在，改为自动分类：{category}")
             category = None
+
         return url.strip(), category
 
     return line.strip(), None
@@ -163,7 +169,7 @@ def sha256_file(path):
     return h.hexdigest()
 
 
-def download_video(url, out_dir="downloads", cookies=None):
+def download_video(url, out_dir="downloads", cookies=None, download_threads=8):
     os.makedirs(out_dir, exist_ok=True)
 
     opts = {
@@ -171,9 +177,9 @@ def download_video(url, out_dir="downloads", cookies=None):
         "format": "bv*+ba/best",
         "merge_output_format": "mp4",
         "noplaylist": True,
-
-        # 多线程/多连接下载
-        "concurrent_fragment_downloads": 8,
+        "concurrent_fragment_downloads": download_threads,
+        "continuedl": True,
+        "nopart": False,
     }
 
     if cookies:
@@ -188,16 +194,17 @@ def download_video(url, out_dir="downloads", cookies=None):
         title = info.get("title") or "未命名视频"
         description = info.get("description") or ""
         source_url = info.get("webpage_url") or url
+        thumbnail = info.get("thumbnail") or ""
 
-        return filename, title, description, source_url
+        return filename, title, description, source_url, thumbnail
 
 
 def login(username, password):
-    res = requests.post(
+    res = SESSION.post(
         f"{BASE_URL}/api/auth/login_api",
         json={
             "username": username,
-            "password": password
+            "password": password,
         },
         timeout=30,
     )
@@ -214,8 +221,9 @@ def login(username, password):
 
     return data["token"]
 
+
 def check_hash(token, file_hash):
-    res = requests.post(
+    res = SESSION.post(
         f"{BASE_URL}/api/videos/upload/check-hash",
         headers=auth_headers(token),
         json={"hash": file_hash},
@@ -227,7 +235,7 @@ def check_hash(token, file_hash):
 
 
 def init_upload(token, filename):
-    res = requests.post(
+    res = SESSION.post(
         f"{BASE_URL}/api/videos/upload/init",
         headers=auth_headers(token),
         json={"filename": os.path.basename(filename)},
@@ -254,7 +262,7 @@ def proxy_put_upload(token, key, path):
                 bar.update(len(data))
                 return data
 
-        res = requests.post(
+        res = SESSION.post(
             f"{BASE_URL}/api/videos/upload/proxy-put",
             params={"key": key},
             headers={
@@ -269,37 +277,53 @@ def proxy_put_upload(token, key, path):
 
 
 def upload_chunk(token, upload_id, key, part_number, data):
-    res = requests.post(
-        f"{BASE_URL}/api/videos/upload/chunk",
-        params={
-            "uploadId": upload_id,
-            "key": key,
-            "partNumber": part_number,
-        },
-        headers={
-            **auth_headers(token),
-            "Content-Type": "application/octet-stream",
-        },
-        data=data,
-        timeout=600,
-    )
+    last_error = None
 
-    res.raise_for_status()
-    return res.json()["part"]
+    for attempt in range(1, 6):
+        try:
+            res = SESSION.post(
+                f"{BASE_URL}/api/videos/upload/chunk",
+                params={
+                    "uploadId": upload_id,
+                    "key": key,
+                    "partNumber": part_number,
+                },
+                headers={
+                    **auth_headers(token),
+                    "Content-Type": "application/octet-stream",
+                },
+                data=data,
+                timeout=600,
+            )
+
+            if not res.ok:
+                print(f"分片 {part_number} 上传失败：{res.status_code} {res.text}")
+
+            res.raise_for_status()
+            return res.json()["part"]
+
+        except Exception as e:
+            last_error = e
+            print(f"分片 {part_number} 第 {attempt}/5 次失败：{e}")
+            time.sleep(attempt * 2)
+
+    raise last_error
 
 
 def multipart_upload(token, upload_id, key, path, threads=4):
     size = os.path.getsize(path)
     parts = []
 
+    total_parts = (size + CHUNK_SIZE - 1) // CHUNK_SIZE
+
     def read_part(part_number):
         offset = (part_number - 1) * CHUNK_SIZE
+
         with open(path, "rb") as f:
             f.seek(offset)
             data = f.read(CHUNK_SIZE)
-        return part_number, data
 
-    total_parts = (size + CHUNK_SIZE - 1) // CHUNK_SIZE
+        return part_number, data
 
     def worker(part_number):
         part_number, data = read_part(part_number)
@@ -327,8 +351,8 @@ def multipart_upload(token, upload_id, key, path, threads=4):
     return parts
 
 
-def complete_upload(token, upload_id, key, video_id, parts, title, description, category):
-    res = requests.post(
+def complete_upload(token, upload_id, key, video_id, parts, title, description, category, thumbnail):
+    res = SESSION.post(
         f"{BASE_URL}/api/videos/upload/complete",
         headers=auth_headers(token),
         json={
@@ -339,6 +363,7 @@ def complete_upload(token, upload_id, key, video_id, parts, title, description, 
             "title": title,
             "description": description,
             "category": category,
+            "thumbnail": thumbnail,
         },
         timeout=60,
     )
@@ -347,8 +372,8 @@ def complete_upload(token, upload_id, key, video_id, parts, title, description, 
     return res.json()
 
 
-def finalize_direct_upload(token, key, video_id, title, description, category, source_url, file_hash):
-    res = requests.post(
+def finalize_direct_upload(token, key, video_id, title, description, category, source_url, file_hash, thumbnail):
+    res = SESSION.post(
         f"{BASE_URL}/api/videos/upload/finalize",
         headers=auth_headers(token),
         json={
@@ -359,6 +384,7 @@ def finalize_direct_upload(token, key, video_id, title, description, category, s
             "category": category,
             "source_url": source_url,
             "file_hash": file_hash,
+            "thumbnail": thumbnail,
         },
         timeout=60,
     )
@@ -370,10 +396,10 @@ def finalize_direct_upload(token, key, video_id, title, description, category, s
 def move_one(url, manual_category, config, token):
     print(f"\n开始处理：{url}")
 
-    path, title, description, source_url = download_video(
+    path, title, description, source_url, thumbnail = download_video(
         url,
         cookies=config.get("cookies"),
-        download_threads=config.get("download_threads", 8)
+        download_threads=config.get("download_threads", 8),
     )
 
     category = manual_category or detect_category(title, description)
@@ -381,6 +407,7 @@ def move_one(url, manual_category, config, token):
     print(f"标题：{title}")
     print(f"分类：{category}")
     print(f"来源：{source_url}")
+    print(f"封面：{thumbnail}")
 
     print("正在计算 SHA256...")
     file_hash = sha256_file(path)
@@ -417,16 +444,18 @@ def move_one(url, manual_category, config, token):
             category=category,
             source_url=source_url,
             file_hash=file_hash,
+            thumbnail=thumbnail,
         )
     else:
         print("使用分片上传模式...")
         upload_id = init["uploadId"]
+
         parts = multipart_upload(
             token,
             upload_id,
             key,
             path,
-            threads=config.get("upload_threads", 4)
+            threads=config.get("upload_threads", 4),
         )
 
         print("正在完成上传...")
@@ -439,6 +468,7 @@ def move_one(url, manual_category, config, token):
             title=title,
             description=description,
             category=category,
+            thumbnail=thumbnail,
         )
 
     print("上传完成：")
