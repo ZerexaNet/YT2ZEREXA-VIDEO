@@ -1,7 +1,9 @@
 import hashlib
 import json
+import mimetypes
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import urlparse
 
 import requests
 from tqdm import tqdm
@@ -236,19 +238,82 @@ def direct_put_upload(token, key, path):
     ) as bar:
 
         class ProgressReader:
+            def __init__(self, raw, total):
+                self.raw = raw
+                self.total = total
+
             def read(self, n=-1):
-                data = f.read(n)
+                data = self.raw.read(n)
                 bar.update(len(data))
                 return data
 
+            def __len__(self):
+                return self.total
+
         res = requests.put(
             put_url,
-            data=ProgressReader(),
-            headers={"Content-Type": "video/mp4"},
+            data=ProgressReader(f, size),
+            headers={
+                "Content-Type": "video/mp4",
+                "Content-Length": str(size),
+            },
             timeout=1800,
         )
 
     res.raise_for_status()
+
+
+def pick_image_extension(content_type, image_url):
+    guessed = mimetypes.guess_extension((content_type or "").split(";")[0].strip())
+    if guessed in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
+        return ".jpg" if guessed == ".jpe" else guessed
+
+    parsed = urlparse(image_url or "")
+    ext = os.path.splitext(parsed.path)[1].lower()
+    if ext in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
+        return ext
+    return ".jpg"
+
+
+def download_thumbnail(image_url, video_path):
+    if not image_url:
+        return None
+
+    res = SESSION.get(image_url, stream=True, timeout=120)
+    res.raise_for_status()
+
+    ext = pick_image_extension(res.headers.get("Content-Type"), image_url)
+    image_path = os.path.splitext(video_path)[0] + f".cover{ext}"
+
+    with open(image_path, "wb") as f:
+        for chunk in res.iter_content(chunk_size=1024 * 256):
+            if chunk:
+                f.write(chunk)
+
+    return image_path
+
+
+def upload_cover(token, video_id, image_path):
+    if not image_path or not os.path.exists(image_path):
+        return None
+
+    content_type = mimetypes.guess_type(image_path)[0] or "application/octet-stream"
+    with open(image_path, "rb") as f:
+        res = SESSION.post(
+            f"{BASE_URL}/api/videos/{video_id}/cover",
+            headers=auth_headers(token),
+            files={
+                "cover": (
+                    os.path.basename(image_path),
+                    f,
+                    content_type,
+                )
+            },
+            timeout=300,
+        )
+
+    res.raise_for_status()
+    return res.json()
 
 
 def upload_chunk(token, upload_id, key, part_number, data):
@@ -361,6 +426,14 @@ def move_one(url, manual_category, config, token):
     print(f"来源：{source_url}")
     print(f"封面：{thumbnail}")
 
+    cover_path = None
+    if thumbnail:
+        try:
+            print("正在下载封面...")
+            cover_path = download_thumbnail(thumbnail, path)
+        except Exception as e:
+            print(f"封面下载失败，继续上传视频：{e}")
+
     print("正在计算 SHA256...")
     file_hash = sha256_file(path)
 
@@ -418,9 +491,21 @@ def move_one(url, manual_category, config, token):
     print("上传完成：")
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
+    if cover_path:
+        try:
+            print("正在上传封面...")
+            cover_result = upload_cover(token, result.get("id") or video_id, cover_path)
+            print("封面上传完成：")
+            print(json.dumps(cover_result, ensure_ascii=False, indent=2))
+        except Exception as e:
+            print(f"封面上传失败，但视频已成功：{e}")
+
     if not config.get("keep", False) and os.path.exists(path):
         os.remove(path)
         print("已删除本地文件。")
+    if cover_path and (not config.get("keep", False)) and os.path.exists(cover_path):
+        os.remove(cover_path)
+        print("已删除本地封面文件。")
 
 
 def main():
