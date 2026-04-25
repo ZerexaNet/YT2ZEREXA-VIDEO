@@ -1,14 +1,15 @@
-import os
-import json
 import hashlib
-import time
+import json
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 import requests
 from tqdm import tqdm
 from yt_dlp import YoutubeDL
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 BASE_URL = "https://video.zerexa.cn"
 CONFIG_FILE = "config.json"
+SMALL_FILE_LIMIT = 100 * 1024 * 1024
 CHUNK_SIZE = 8 * 1024 * 1024
 
 SESSION = requests.Session()
@@ -43,78 +44,65 @@ CATEGORY_KEYWORDS = {
     "Tech / Hardware": ["cpu", "gpu", "显卡", "处理器", "硬件", "主板", "内存"],
     "Tech / Mobile": ["iphone", "android", "手机", "小米", "华为", "三星", "pixel"],
     "Tech / Cybersecurity": ["网络安全", "黑客", "漏洞", "渗透", "security", "hacker"],
-
     "Games / Gameplay": ["gameplay", "实况", "通关", "我的世界", "minecraft", "原神", "游戏"],
     "Games / Esports": ["电竞", "比赛", "esports", "tournament"],
     "Games / Review": ["游戏评测", "game review"],
     "Games / Mobile Games": ["手游", "mobile game"],
     "Games / Indie": ["独立游戏", "indie game"],
-
     "Music / Original": ["原创歌曲", "original song"],
     "Music / Cover": ["cover", "翻唱"],
     "Music / Instrumental": ["instrumental", "纯音乐", "伴奏"],
     "Music / MV": ["mv", "music video"],
     "Music / Live": ["live", "演唱会", "现场"],
-
     "Anime / AMV": ["amv"],
     "Anime / Review": ["番剧", "动画评测", "anime review"],
     "Anime / Discussion": ["动漫讨论", "anime discussion"],
     "Anime / Cosplay": ["cosplay"],
     "Anime / Manga": ["漫画", "manga"],
-
     "Film / Trailer": ["trailer", "预告片"],
     "Film / Review": ["影评", "movie review", "film review"],
     "Film / Documentary": ["纪录片", "documentary"],
     "Film / Short Film": ["短片", "short film"],
-
     "Food / Recipe": ["recipe", "菜谱", "做饭", "烹饪"],
     "Food / Restaurant": ["餐厅", "restaurant"],
     "Food / Street Food": ["街头美食", "street food"],
     "Food / Baking": ["烘焙", "baking"],
     "Food / Drinks": ["饮品", "drink", "coffee"],
-
     "Travel / City": ["城市旅行", "city tour"],
     "Travel / Nature": ["自然", "风景", "nature"],
     "Travel / Road Trip": ["自驾", "road trip"],
     "Travel / International": ["出国", "international travel"],
     "Travel / Tips": ["旅行攻略", "travel tips"],
-
     "Education / Science": ["科普", "science"],
     "Education / History": ["历史", "history"],
     "Education / Language": ["英语", "语言", "language"],
     "Education / Math": ["数学", "math"],
     "Education / DIY": ["diy", "手工", "教程"],
-
     "News / Tech News": ["科技新闻", "tech news"],
     "News / Finance": ["财经", "finance"],
     "News / Politics": ["政治", "politics"],
     "News / Environment": ["环境", "environment"],
     "News / World": ["新闻", "news"],
-
     "Comedy / Memes": ["meme", "梗", "鬼畜"],
     "Comedy / Sketch": ["短剧", "sketch"],
     "Comedy / Stand-up": ["脱口秀", "stand-up"],
     "Comedy / Parody": ["恶搞", "parody"],
     "Comedy / Satire": ["讽刺", "satire"],
-
     "Fitness / Workout": ["健身", "workout"],
     "Fitness / Yoga": ["瑜伽", "yoga"],
     "Fitness / Nutrition": ["营养", "nutrition"],
     "Fitness / Weight Loss": ["减肥", "weight loss"],
     "Fitness / Running": ["跑步", "running"],
-
     "Sports / Football": ["足球", "football", "soccer"],
     "Sports / Basketball": ["篮球", "basketball", "nba"],
     "Sports / Outdoor": ["户外", "outdoor"],
     "Sports / Martial Arts": ["武术", "格斗", "martial arts"],
     "Sports / Extreme": ["极限运动", "extreme sports"],
-
     "Science / Physics": ["物理", "physics"],
     "Science / Biology": ["生物", "biology"],
     "Science / Space": ["太空", "宇宙", "space"],
     "Science / Chemistry": ["化学", "chemistry"],
     "Science / Engineering": ["工程", "engineering"],
-
     "Cars / Review": ["汽车评测", "car review"],
     "Cars / Modification": ["改装车", "modification"],
     "Cars / Racing": ["赛车", "racing"],
@@ -129,19 +117,15 @@ def load_config():
 
 
 def auth_headers(token):
-    return {
-        "Authorization": f"Bearer {token}",
-    }
+    return {"Authorization": f"Bearer {token}"}
 
 
 def detect_category(title, description):
     text = f"{title} {description}".lower()
-
     for category, keywords in CATEGORY_KEYWORDS.items():
         for kw in keywords:
             if kw.lower() in text:
                 return category
-
     return "General / Other"
 
 
@@ -149,29 +133,23 @@ def parse_input(line):
     if "|" in line:
         url, category = line.split("|", 1)
         category = category.strip()
-
         if category not in CATEGORY_LIST:
             print(f"分类不存在，改为自动分类：{category}")
             category = None
-
         return url.strip(), category
-
     return line.strip(), None
 
 
 def sha256_file(path):
     h = hashlib.sha256()
-
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(1024 * 1024), b""):
             h.update(chunk)
-
     return h.hexdigest()
 
 
 def download_video(url, out_dir="downloads", cookies=None, download_threads=8):
     os.makedirs(out_dir, exist_ok=True)
-
     opts = {
         "outtmpl": f"{out_dir}/%(title).80s.%(ext)s",
         "format": "bv*+ba/best",
@@ -181,44 +159,34 @@ def download_video(url, out_dir="downloads", cookies=None, download_threads=8):
         "continuedl": True,
         "nopart": False,
     }
-
     if cookies:
         opts["cookiefile"] = cookies
 
     with YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=True)
-
         filename = ydl.prepare_filename(info)
         filename = os.path.splitext(filename)[0] + ".mp4"
-
         title = info.get("title") or "未命名视频"
         description = info.get("description") or ""
         source_url = info.get("webpage_url") or url
         thumbnail = info.get("thumbnail") or ""
-
         return filename, title, description, source_url, thumbnail
 
 
 def login(username, password):
     res = SESSION.post(
         f"{BASE_URL}/api/auth/login_api",
-        json={
-            "username": username,
-            "password": password,
-        },
+        json={"username": username, "password": password},
         timeout=30,
     )
-
     if not res.ok:
         print("登录失败，状态码：", res.status_code)
         print("后端返回：", res.text)
         raise RuntimeError("登录失败")
 
     data = res.json()
-
-    if not data.get("success"):
+    if not data.get("success") or not data.get("token"):
         raise RuntimeError(f"登录失败：{data}")
-
     return data["token"]
 
 
@@ -227,9 +195,8 @@ def check_hash(token, file_hash):
         f"{BASE_URL}/api/videos/upload/check-hash",
         headers=auth_headers(token),
         json={"hash": file_hash},
-        timeout=30,
+        timeout=60,
     )
-
     res.raise_for_status()
     return res.json()
 
@@ -239,14 +206,26 @@ def init_upload(token, filename):
         f"{BASE_URL}/api/videos/upload/init",
         headers=auth_headers(token),
         json={"filename": os.path.basename(filename)},
-        timeout=30,
+        timeout=60,
     )
-
     res.raise_for_status()
     return res.json()
 
 
-def proxy_put_upload(token, key, path):
+def get_presign_put_url(token, key):
+    res = SESSION.get(
+        f"{BASE_URL}/api/videos/upload/presign-put",
+        params={"key": key},
+        headers=auth_headers(token),
+        timeout=60,
+    )
+    res.raise_for_status()
+    data = res.json()
+    return data.get("putUrl") or data.get("url")
+
+
+def direct_put_upload(token, key, path):
+    put_url = get_presign_put_url(token, key)
     size = os.path.getsize(path)
 
     with open(path, "rb") as f, tqdm(
@@ -262,15 +241,11 @@ def proxy_put_upload(token, key, path):
                 bar.update(len(data))
                 return data
 
-        res = SESSION.post(
-            f"{BASE_URL}/api/videos/upload/proxy-put",
-            params={"key": key},
-            headers={
-                **auth_headers(token),
-                "Content-Type": "application/octet-stream",
-            },
+        res = requests.put(
+            put_url,
             data=ProgressReader(),
-            timeout=600,
+            headers={"Content-Type": "video/mp4"},
+            timeout=1800,
         )
 
     res.raise_for_status()
@@ -278,7 +253,6 @@ def proxy_put_upload(token, key, path):
 
 def upload_chunk(token, upload_id, key, part_number, data):
     last_error = None
-
     for attempt in range(1, 6):
         try:
             res = SESSION.post(
@@ -293,36 +267,28 @@ def upload_chunk(token, upload_id, key, part_number, data):
                     "Content-Type": "application/octet-stream",
                 },
                 data=data,
-                timeout=600,
+                timeout=1800,
             )
-
             if not res.ok:
                 print(f"分片 {part_number} 上传失败：{res.status_code} {res.text}")
-
             res.raise_for_status()
             return res.json()["part"]
-
         except Exception as e:
             last_error = e
             print(f"分片 {part_number} 第 {attempt}/5 次失败：{e}")
-            time.sleep(attempt * 2)
-
     raise last_error
 
 
 def multipart_upload(token, upload_id, key, path, threads=4):
     size = os.path.getsize(path)
-    parts = []
-
     total_parts = (size + CHUNK_SIZE - 1) // CHUNK_SIZE
+    parts = []
 
     def read_part(part_number):
         offset = (part_number - 1) * CHUNK_SIZE
-
         with open(path, "rb") as f:
             f.seek(offset)
             data = f.read(CHUNK_SIZE)
-
         return part_number, data
 
     def worker(part_number):
@@ -330,18 +296,9 @@ def multipart_upload(token, upload_id, key, path, threads=4):
         part = upload_chunk(token, upload_id, key, part_number, data)
         return part, len(data)
 
-    with tqdm(
-        total=size,
-        unit="B",
-        unit_scale=True,
-        desc=f"分片上传 {threads}线程",
-    ) as bar:
+    with tqdm(total=size, unit="B", unit_scale=True, desc=f"分片上传 {threads}线程") as bar:
         with ThreadPoolExecutor(max_workers=threads) as executor:
-            futures = [
-                executor.submit(worker, part_number)
-                for part_number in range(1, total_parts + 1)
-            ]
-
+            futures = [executor.submit(worker, part_number) for part_number in range(1, total_parts + 1)]
             for future in as_completed(futures):
                 part, uploaded_size = future.result()
                 parts.append(part)
@@ -351,7 +308,7 @@ def multipart_upload(token, upload_id, key, path, threads=4):
     return parts
 
 
-def complete_upload(token, upload_id, key, video_id, parts, title, description, category, thumbnail):
+def complete_upload(token, upload_id, key, video_id, parts, title, description, category):
     res = SESSION.post(
         f"{BASE_URL}/api/videos/upload/complete",
         headers=auth_headers(token),
@@ -363,16 +320,14 @@ def complete_upload(token, upload_id, key, video_id, parts, title, description, 
             "title": title,
             "description": description,
             "category": category,
-            "thumbnail": thumbnail,
         },
-        timeout=60,
+        timeout=120,
     )
-
     res.raise_for_status()
     return res.json()
 
 
-def finalize_direct_upload(token, key, video_id, title, description, category, source_url, file_hash, thumbnail):
+def finalize_direct_upload(token, key, video_id, title, description, category, source_url, file_hash):
     res = SESSION.post(
         f"{BASE_URL}/api/videos/upload/finalize",
         headers=auth_headers(token),
@@ -384,11 +339,9 @@ def finalize_direct_upload(token, key, video_id, title, description, category, s
             "category": category,
             "source_url": source_url,
             "file_hash": file_hash,
-            "thumbnail": thumbnail,
         },
-        timeout=60,
+        timeout=120,
     )
-
     res.raise_for_status()
     return res.json()
 
@@ -403,7 +356,6 @@ def move_one(url, manual_category, config, token):
     )
 
     category = manual_category or detect_category(title, description)
-
     print(f"标题：{title}")
     print(f"分类：{category}")
     print(f"来源：{source_url}")
@@ -414,133 +366,22 @@ def move_one(url, manual_category, config, token):
 
     print("正在检查秒传...")
     hash_result = check_hash(token, file_hash)
-
     if hash_result.get("exists"):
-        print("服务器已存在，跳过上传：")
-        print(json.dumps(hash_result, ensure_ascii=False, indent=2))
-
-        if not config.get("keep", False):
-            os.remove(path)
-
-        return
+      print("服务器已存在，跳过上传：")
+      print(json.dumps(hash_result, ensure_ascii=False, indent=2))
+      if not config.get("keep", False) and os.path.exists(path):
+          os.remove(path)
+      return
 
     print("正在初始化上传...")
     init = init_upload(token, path)
-
     key = init["key"]
     video_id = init["videoId"]
-
     size = os.path.getsize(path)
 
-    if init.get("directUpload") or size < 100 * 1024 * 1024:
-        if size < 100 * 1024 * 1024:
-            print("小文件，强制直传...")
-        else:
-            print("使用直传模式...")
-
-        proxy_put_upload(token, key, path)
-
-        print("正在写入数据库...")
-        result = finalize_direct_upload(
-            token=token,
-            key=key,
-            video_id=video_id,
-            title=title,
-            description=description,
-            category=category,
-            source_url=source_url,
-            file_hash=file_hash,
-            thumbnail=thumbnail,
-        )
-    else:
-        print("使用分片上传模式...")
-        upload_id = init["uploadId"]
-
-        parts = multipart_upload(
-            token,
-            upload_id,
-            key,
-            path,
-            threads=config.get("upload_threads", 4),
-        )
-
-        print("正在完成上传...")
-        result = complete_upload(
-            token=token,
-            upload_id=upload_id,
-            key=key,
-            video_id=video_id,
-            parts=parts,
-            title=title,
-            description=description,
-            category=category,
-            thumbnail=thumbnail,
-        )
-
-    print("上传完成：")
-    print(json.dumps(result, ensure_ascii=False, indent=2))
-
-    if not config.get("keep", False):
-        os.remove(path)
-        print("已删除本地文件。")
-    size = os.path.getsize(path)
-
-    if size < 100 * 1024 * 1024:
-        print("小文件，强制直传...")
-        proxy_put_upload(token, key, path)
-
-        result = finalize_direct_upload(
-            token=token,
-            key=key,
-            video_id=video_id,
-            title=title,
-            description=description,
-            category=category,
-            source_url=source_url,
-            file_hash=file_hash,
-            thumbnail=thumbnail,
-        )
-        return
-    print(f"\n开始处理：{url}")
-
-    path, title, description, source_url, thumbnail = download_video(
-        url,
-        cookies=config.get("cookies"),
-        download_threads=config.get("download_threads", 8),
-    )
-
-    category = manual_category or detect_category(title, description)
-
-    print(f"标题：{title}")
-    print(f"分类：{category}")
-    print(f"来源：{source_url}")
-    print(f"封面：{thumbnail}")
-
-    print("正在计算 SHA256...")
-    file_hash = sha256_file(path)
-
-    print("正在检查秒传...")
-    hash_result = check_hash(token, file_hash)
-
-    if hash_result.get("exists"):
-        print("服务器已存在，跳过上传：")
-        print(json.dumps(hash_result, ensure_ascii=False, indent=2))
-
-        if not config.get("keep", False):
-            os.remove(path)
-
-        return
-
-    print("正在初始化上传...")
-    init = init_upload(token, path)
-
-    key = init["key"]
-    video_id = init["videoId"]
-
-    if init.get("directUpload"):
+    if init.get("directUpload") or size < SMALL_FILE_LIMIT:
         print("使用直传模式...")
-        proxy_put_upload(token, key, path)
-
+        direct_put_upload(token, key, path)
         print("正在写入数据库...")
         result = finalize_direct_upload(
             token=token,
@@ -551,12 +392,10 @@ def move_one(url, manual_category, config, token):
             category=category,
             source_url=source_url,
             file_hash=file_hash,
-            thumbnail=thumbnail,
         )
     else:
         print("使用分片上传模式...")
         upload_id = init["uploadId"]
-
         parts = multipart_upload(
             token,
             upload_id,
@@ -564,7 +403,6 @@ def move_one(url, manual_category, config, token):
             path,
             threads=config.get("upload_threads", 4),
         )
-
         print("正在完成上传...")
         result = complete_upload(
             token=token,
@@ -575,13 +413,12 @@ def move_one(url, manual_category, config, token):
             title=title,
             description=description,
             category=category,
-            thumbnail=thumbnail,
         )
 
     print("上传完成：")
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
-    if not config.get("keep", False):
+    if not config.get("keep", False) and os.path.exists(path):
         os.remove(path)
         print("已删除本地文件。")
 
@@ -599,15 +436,11 @@ def main():
     print("输入空行开始执行。\n")
 
     tasks = []
-
     while True:
         line = input("> ").strip()
-
         if not line:
             break
-
         url, manual_category = parse_input(line)
-
         if url:
             tasks.append((url, manual_category))
 
@@ -617,7 +450,6 @@ def main():
 
     for i, (url, manual_category) in enumerate(tasks, 1):
         print(f"\n========== {i}/{len(tasks)} ==========")
-
         try:
             move_one(url, manual_category, config, token)
         except Exception as e:
