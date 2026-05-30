@@ -1,7 +1,6 @@
 {
-  "username": "demo",
-  "password": "123456",
-  "keep": false,
+  "auth_cookies": "zerexa_cookies.txt",
+  "keep": true,
   "upload_threads": 8,
   "download_threads": 4
 }

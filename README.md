@@ -38,21 +38,20 @@ pip install requests yt-dlp tqdm
 main.py
 config.json
 cookies.txt
+zerexa_cookies.txt
 
 ---
 
 ## 配置文件（config.json）
 {
-  "username": "demo",
-  "password": "123456",
+  "auth_cookies": "zerexa_cookies.txt",
   "cookies": "cookies.txt",
   "keep": false
 }
 字段说明
 | 字段               | 说明              |
 | ---------------- | --------------- |
-| username         | 账号用户名           |
-| password         | 账号密码            |
+| auth_cookies     | Zerexa Video 登录 cookie 文件 |
 | cookies          | 可选，用于需要登录状态的视频  |
 | keep             | 上传完成后是否保留本地视频文件 |
 | download_threads | 下载线程数           |
@@ -68,6 +67,30 @@ python main.py
 ```
 
 启动后输入视频链接，一行一个，输入空行后开始执行。
+
+---
+
+## Zerexa 登录 cookie
+
+脚本不再使用账号密码登录，也不再调用免验证登录接口。
+
+请先在浏览器登录 `https://video.zerexa.cn`，然后单独导出本站的 `token` cookie 到：
+
+```text
+zerexa_cookies.txt
+```
+
+`zerexa_cookies.txt` 支持三种格式：
+
+```text
+token=eyJ...
+```
+
+```text
+eyJ...   # 直接放 JWT token
+```
+
+或浏览器扩展导出的 Netscape cookies / JSON cookies。只要里面有名为 `token` 的 cookie 即可。
 
 ---
 
@@ -117,6 +140,8 @@ cookies 说明
 "cookies": "cookies.txt"
 
 不需要时可以删除该字段。
+
+注意：`cookies` 是给 yt-dlp 下载视频用的站外 cookie；`auth_cookies` 是 Zerexa Video 上传认证用的本站 cookie，两者请分开保存。
 
 ---
 

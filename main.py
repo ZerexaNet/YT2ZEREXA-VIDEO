@@ -2,8 +2,9 @@ import hashlib
 import json
 import mimetypes
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import requests
 from tqdm import tqdm
@@ -13,6 +14,7 @@ BASE_URL = "https://video.zerexa.cn"
 CONFIG_FILE = "config.json"
 SMALL_FILE_LIMIT = 100 * 1024 * 1024
 CHUNK_SIZE = 8 * 1024 * 1024
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 SESSION = requests.Session()
 SESSION.trust_env = False
@@ -122,6 +124,123 @@ def auth_headers(token):
     return {"Authorization": f"Bearer {token}"}
 
 
+def resolve_file_path(path):
+    if not path:
+        return None
+    if os.path.isabs(path):
+        return path
+    if os.path.exists(path):
+        return path
+    return os.path.join(SCRIPT_DIR, path)
+
+
+def resolve_cookie_file(config):
+    configured = (config.get("cookies") or "").strip()
+    configured_path = resolve_file_path(configured)
+    if configured_path and os.path.exists(configured_path):
+        return configured_path
+
+    local_cookie = os.path.join(SCRIPT_DIR, "cookies.txt")
+    if os.path.exists(local_cookie):
+        return local_cookie
+    return None
+
+
+def resolve_auth_cookie_file(config):
+    configured = (
+        config.get("auth_cookies")
+        or config.get("auth_cookie_file")
+        or config.get("zerexa_cookies")
+        or ""
+    ).strip()
+    configured_path = resolve_file_path(configured)
+    if configured_path and os.path.exists(configured_path):
+        return configured_path
+
+    local_cookie = os.path.join(SCRIPT_DIR, "zerexa_cookies.txt")
+    if os.path.exists(local_cookie):
+        return local_cookie
+    return None
+
+
+def is_jwt_like(value):
+    value = (value or "").strip()
+    return value.count(".") == 2 and value.startswith("eyJ") and len(value) > 40
+
+
+def token_from_json_cookie(data):
+    if isinstance(data, dict):
+        if data.get("name") == "token" and data.get("value"):
+            return data["value"]
+        for key in ("cookies", "items"):
+            token = token_from_json_cookie(data.get(key))
+            if token:
+                return token
+        return None
+    if isinstance(data, list):
+        for item in data:
+            token = token_from_json_cookie(item)
+            if token:
+                return token
+    return None
+
+
+def extract_auth_token_from_cookie_file(path):
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read().strip()
+    if not text:
+        raise RuntimeError(f"站点 cookie 文件为空：{path}")
+
+    if is_jwt_like(text):
+        return text
+
+    if text.startswith("{") or text.startswith("["):
+        try:
+            token = token_from_json_cookie(json.loads(text))
+            if token:
+                return unquote(str(token).strip())
+        except json.JSONDecodeError:
+            pass
+
+    for segment in text.replace("\n", ";").split(";"):
+        segment = segment.strip()
+        if segment.startswith("token="):
+            return unquote(segment.split("=", 1)[1].strip())
+
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if len(parts) >= 7 and parts[-2] == "token":
+            return unquote(parts[-1].strip())
+
+    raise RuntimeError("没有在站点 cookie 文件中找到 token。请从 video.zerexa.cn 登录后导出 token cookie。")
+
+
+def load_auth_token(config):
+    auth_cookie = resolve_auth_cookie_file(config)
+    if not auth_cookie:
+        raise RuntimeError('缺少站点登录 cookie。请在 config.json 设置 "auth_cookies": "zerexa_cookies.txt"。')
+
+    token = extract_auth_token_from_cookie_file(auth_cookie)
+    if not is_jwt_like(token):
+        raise RuntimeError("站点 cookie 中的 token 格式不正确，请重新导出。")
+
+    SESSION.cookies.set("token", token, domain="video.zerexa.cn", path="/")
+    res = SESSION.get(f"{BASE_URL}/api/users/me", headers=auth_headers(token), timeout=30)
+    if not res.ok:
+        print("站点 cookie 验证失败，状态码：", res.status_code)
+        print("后端返回：", res.text)
+        raise RuntimeError("站点 cookie 无效或已过期，请重新登录并导出。")
+
+    data = res.json()
+    username = data.get("username") or data.get("user", {}).get("username") or "未知用户"
+    uid = data.get("uid") or data.get("user", {}).get("uid") or "-"
+    print(f"已导入站点登录 cookie：@{username} (UID: {uid})")
+    return token
+
+
 def detect_category(title, description):
     text = f"{title} {description}".lower()
     for category, keywords in CATEGORY_KEYWORDS.items():
@@ -150,8 +269,47 @@ def sha256_file(path):
     return h.hexdigest()
 
 
+class YDLLogger:
+    def debug(self, msg):
+        text = str(msg or "").strip()
+        if not text:
+            return
+        if text.startswith("[download]") or text.startswith("[youtube]") or text.startswith("[info]") or text.startswith("[Merger]"):
+            print(text)
+
+    def warning(self, msg):
+        print(f"[yt-dlp warning] {msg}")
+
+    def error(self, msg):
+        print(f"[yt-dlp error] {msg}")
+
+
 def download_video(url, out_dir="downloads", cookies=None, download_threads=8):
     os.makedirs(out_dir, exist_ok=True)
+    last_status = {"value": ""}
+
+    def progress_hook(d):
+        status = d.get("status")
+        if status == "downloading":
+            downloaded = d.get("downloaded_bytes", 0)
+            total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+            speed = d.get("speed") or 0
+            eta = d.get("eta")
+            line = (
+                f"[download] {downloaded / 1024 / 1024:.1f}MB"
+                + (f"/{total / 1024 / 1024:.1f}MB" if total else "")
+                + (f"  {speed / 1024 / 1024:.2f}MB/s" if speed else "")
+                + (f"  ETA {eta}s" if eta is not None else "")
+            )
+        elif status == "finished":
+            line = "[download] 下载完成，正在合并/整理文件..."
+        else:
+            line = f"[download] 状态：{status}"
+
+        if line != last_status["value"]:
+            print(line)
+            last_status["value"] = line
+
     opts = {
         "outtmpl": f"{out_dir}/%(title).80s.%(ext)s",
         "format": "bv*+ba/best",
@@ -160,36 +318,31 @@ def download_video(url, out_dir="downloads", cookies=None, download_threads=8):
         "concurrent_fragment_downloads": download_threads,
         "continuedl": True,
         "nopart": False,
+        "retries": 10,
+        "fragment_retries": 10,
+        "extractor_retries": 5,
+        "socket_timeout": 30,
+        "http_chunk_size": 10485760,
+        "progress_hooks": [progress_hook],
+        "logger": YDLLogger(),
     }
     if cookies:
         opts["cookiefile"] = cookies
 
     with YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=True)
+        print("正在解析视频信息...")
+        start = time.time()
+        info = ydl.extract_info(url, download=False)
+        print(f"信息解析完成，用时 {time.time() - start:.1f}s")
+        title = info.get("title") or "未命名视频"
+        print(f"准备下载：{title}")
+        ydl.process_ie_result(info, download=True)
         filename = ydl.prepare_filename(info)
         filename = os.path.splitext(filename)[0] + ".mp4"
-        title = info.get("title") or "未命名视频"
         description = info.get("description") or ""
         source_url = info.get("webpage_url") or url
         thumbnail = info.get("thumbnail") or ""
         return filename, title, description, source_url, thumbnail
-
-
-def login(username, password):
-    res = SESSION.post(
-        f"{BASE_URL}/api/auth/login_api",
-        json={"username": username, "password": password},
-        timeout=30,
-    )
-    if not res.ok:
-        print("登录失败，状态码：", res.status_code)
-        print("后端返回：", res.text)
-        raise RuntimeError("登录失败")
-
-    data = res.json()
-    if not data.get("success") or not data.get("token"):
-        raise RuntimeError(f"登录失败：{data}")
-    return data["token"]
 
 
 def check_hash(token, file_hash):
@@ -320,24 +473,28 @@ def upload_chunk(token, upload_id, key, part_number, data):
     last_error = None
     for attempt in range(1, 6):
         try:
-            res = SESSION.post(
-                f"{BASE_URL}/api/videos/upload/chunk",
-                params={
-                    "uploadId": upload_id,
-                    "key": key,
-                    "partNumber": part_number,
-                },
-                headers={
-                    **auth_headers(token),
-                    "Content-Type": "application/octet-stream",
-                },
+            # 获取预签名 URL
+            sign_res = SESSION.get(
+                f"{BASE_URL}/api/videos/upload/presign-part",
+                params={"key": key, "uploadId": upload_id, "partNumber": part_number},
+                headers=auth_headers(token),
+                timeout=60,
+            )
+            sign_res.raise_for_status()
+            put_url = sign_res.json()["url"]
+
+            # 直接 PUT 到 S3
+            res = requests.put(
+                put_url,
                 data=data,
+                headers={"Content-Type": "application/octet-stream"},
                 timeout=1800,
             )
             if not res.ok:
-                print(f"分片 {part_number} 上传失败：{res.status_code} {res.text}")
+                print(f"分片 {part_number} 上传失败：{res.status_code}")
             res.raise_for_status()
-            return res.json()["part"]
+            etag = res.headers.get("ETag", "")
+            return {"PartNumber": part_number, "ETag": etag}
         except Exception as e:
             last_error = e
             print(f"分片 {part_number} 第 {attempt}/5 次失败：{e}")
@@ -414,9 +571,13 @@ def finalize_direct_upload(token, key, video_id, title, description, category, s
 def move_one(url, manual_category, config, token):
     print(f"\n开始处理：{url}")
 
+    cookie_file = resolve_cookie_file(config)
+    if cookie_file:
+        print(f"使用 cookies：{cookie_file}")
+
     path, title, description, source_url, thumbnail = download_video(
         url,
-        cookies=config.get("cookies"),
+        cookies=cookie_file,
         download_threads=config.get("download_threads", 8),
     )
 
@@ -511,9 +672,9 @@ def move_one(url, manual_category, config, token):
 def main():
     config = load_config()
 
-    print("正在登录...")
-    token = login(config["username"], config["password"])
-    print("登录成功。")
+    print("正在导入站点登录 cookie...")
+    token = load_auth_token(config)
+    print("站点登录 cookie 验证成功。")
 
     print("\n请输入视频链接，一行一个。")
     print("可手动指定分类：链接 | 分类名(不填写会自动分类)")
