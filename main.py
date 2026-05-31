@@ -284,7 +284,7 @@ class YDLLogger:
         print(f"[yt-dlp error] {msg}")
 
 
-def download_video(url, out_dir="downloads", cookies=None, download_threads=8):
+def download_video(url, out_dir="downloads", cookies=None, download_threads=8, proxy=None):
     os.makedirs(out_dir, exist_ok=True)
     last_status = {"value": ""}
 
@@ -328,6 +328,8 @@ def download_video(url, out_dir="downloads", cookies=None, download_threads=8):
     }
     if cookies:
         opts["cookiefile"] = cookies
+    if proxy:
+        opts["proxy"] = proxy
 
     with YoutubeDL(opts) as ydl:
         print("正在解析视频信息...")
@@ -487,7 +489,10 @@ def upload_chunk(token, upload_id, key, part_number, data):
             res = requests.put(
                 put_url,
                 data=data,
-                headers={"Content-Type": "application/octet-stream"},
+                headers={
+                    "Content-Type": "application/octet-stream",
+                    "Content-Length": str(len(data)),
+                },
                 timeout=1800,
             )
             if not res.ok:
@@ -579,6 +584,7 @@ def move_one(url, manual_category, config, token):
         url,
         cookies=cookie_file,
         download_threads=config.get("download_threads", 8),
+        proxy=config.get("proxy"),
     )
 
     category = manual_category or detect_category(title, description)
